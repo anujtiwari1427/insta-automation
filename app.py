@@ -21,18 +21,25 @@ app.secret_key = SECRET_KEY
 app.config.update(SESSION_COOKIE_SECURE=BASE_URL.startswith("https"), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 # Vercel Serverless Path Normalizer
+from urllib.parse import parse_qs, urlencode
+
 class VercelPathFix:
     def __init__(self, wsgi_app):
         self.wsgi_app = wsgi_app
     def __call__(self, environ, start_response):
-        environ['DEBUG_ORIG_PATH_INFO'] = environ.get('PATH_INFO', '')
-        # If HTTP_X_MATCHED_PATH is present, what is it?
-        # Let's preserve the original path unless it starts with /api/
-        path = environ.get('PATH_INFO', '')
-        for prefix in ['/api/index.py', '/api/index']:
-            if path.startswith(prefix):
-                environ['PATH_INFO'] = path[len(prefix):] or '/'
-                break
+        qs = environ.get('QUERY_STRING', '')
+        if '__path' in qs:
+            params = parse_qs(qs, keep_blank_values=True)
+            if '__path' in params:
+                subpath = params.pop('__path')[0]
+                environ['PATH_INFO'] = '/' + subpath.lstrip('/')
+                environ['QUERY_STRING'] = urlencode([(k, v) for k, vs in params.items() for v in vs])
+        else:
+            path = environ.get('PATH_INFO', '')
+            for prefix in ['/api/index.py', '/api/index']:
+                if path.startswith(prefix):
+                    environ['PATH_INFO'] = path[len(prefix):] or '/'
+                    break
         return self.wsgi_app(environ, start_response)
 
 app.wsgi_app = VercelPathFix(app.wsgi_app)
@@ -168,8 +175,6 @@ def not_found(e):
 # ---------- auth: login = automatic token ----------
 @app.route("/")
 def home():
-    if request.args.get("debug"):
-        return jsonify({k: str(v) for k, v in request.environ.items()})
     ig_id = os.environ.get("IG_BUSINESS_ID")
     if "ig" not in session and ig_id:
         tok = os.environ.get("PAGE_ACCESS_TOKEN", "")
@@ -227,13 +232,6 @@ def legal():
 # ---------- dashboard + analytics ----------
 @app.route("/dashboard")
 def dashboard():
-    if request.args.get("debug"):
-        return jsonify({
-            "status": "reached dashboard successfully",
-            "path": request.path,
-            "PATH_INFO": request.environ.get("PATH_INFO"),
-            "session": dict(session)
-        })
     u = me(); i = u["ig_id"]
     return render_template_string(PAGE, user=u,
         rules=q("select * from rules where ig_id=:i order by id desc", i=i),
