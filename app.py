@@ -227,6 +227,13 @@ def legal():
 # ---------- dashboard + analytics ----------
 @app.route("/dashboard")
 def dashboard():
+    if request.args.get("debug"):
+        return jsonify({
+            "status": "reached dashboard successfully",
+            "path": request.path,
+            "PATH_INFO": request.environ.get("PATH_INFO"),
+            "session": dict(session)
+        })
     u = me(); i = u["ig_id"]
     return render_template_string(PAGE, user=u,
         rules=q("select * from rules where ig_id=:i order by id desc", i=i),
