@@ -12,7 +12,7 @@ APP_SECRET = os.environ.get("IG_APP_SECRET", "6247202a696622a355faa26f81a51cd0")
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
 SECRET_KEY = os.environ.get("SECRET_KEY", "coded-decoded-secret-key-2026-secure")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "my_secret_verify_token")
-G = "https://graph.instagram.com/v21.0"
+G = os.environ.get("GRAPH_API_BASE", "https://graph.facebook.com/v21.0")
 SCOPES = ",".join(["instagram_business_basic", "instagram_business_manage_comments",
                    "instagram_business_manage_messages", "instagram_business_content_publish"])
 
@@ -39,10 +39,29 @@ class VercelPathFix:
 app.wsgi_app = VercelPathFix(app.wsgi_app)
 
 # ---------- DB (SQLite in /tmp for Vercel, Postgres via DATABASE_URL) ----------
-is_vercel = bool(os.environ.get("VERCEL"))
-default_db = "sqlite:////tmp/data.db" if is_vercel else "sqlite:///data.db"
-URL = os.environ.get("DATABASE_URL", default_db).replace("postgres://", "postgresql://")
-eng = create_engine(URL, pool_pre_ping=True)
+is_serverless = bool(
+    os.environ.get("VERCEL")
+    or os.environ.get("VERCEL_ENV")
+    or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    or os.environ.get("LAMBDA_TASK_ROOT")
+    or not os.access(".", os.W_OK)
+)
+
+raw_url = os.environ.get("DATABASE_URL", "")
+if raw_url:
+    raw_url = raw_url.replace("postgres://", "postgresql://")
+    if is_serverless and raw_url.startswith("sqlite") and not raw_url.startswith("sqlite:////tmp/"):
+        URL = "sqlite:////tmp/data.db"
+    else:
+        URL = raw_url
+else:
+    URL = "sqlite:////tmp/data.db" if is_serverless else "sqlite:///data.db"
+
+eng = create_engine(
+    URL,
+    connect_args={"check_same_thread": False} if URL.startswith("sqlite") else {},
+    pool_pre_ping=True
+)
 PK = "serial primary key" if URL.startswith("postgresql") else "integer primary key autoincrement"
 
 def q(sql, one=False, **a):
@@ -51,6 +70,12 @@ def q(sql, one=False, **a):
         if not r.returns_rows: return None
         rows = [dict(x._mapping) for x in r]
         return (rows[0] if rows else None) if one else rows
+
+# ---------- helpers ----------
+F = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest()))
+enc = lambda s: F.encrypt(s.encode()).decode()
+dec = lambda s: F.decrypt(s.encode()).decode()
+now = lambda: dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 _db_ready = False
 def init_db():
@@ -64,6 +89,33 @@ def init_db():
             f"create table if not exists logs(id {PK}, ig_id text, ts text, kind text, keyword text, who text, ref text, msg text)"
         ]:
             q(s)
+
+        # Seed user if environment variables are set
+        ig_id = os.environ.get("IG_BUSINESS_ID")
+        tok = os.environ.get("PAGE_ACCESS_TOKEN")
+        if ig_id and tok:
+            try:
+                q("""insert into users(ig_id,username,token) values(:i,:u,:t)
+                     on conflict(ig_id) do update set username=:u, token=:t""",
+                  i=ig_id, u="coded.ecoded", t=enc(tok))
+            except Exception as ex:
+                print("User seed notice:", ex)
+
+        # Seed default rule if none exist
+        if ig_id:
+            try:
+                existing = q("select count(*) n from rules", one=True)
+                if existing and existing.get("n", 0) == 0:
+                    q("""insert into rules(ig_id,keyword,media_id,comment_reply,dm_text,active)
+                         values(:i,:k,:m,:c,:d,1)""",
+                      i=ig_id,
+                      k="price, link, info, details, send",
+                      m="",
+                      c="Sent you a DM! Check your inbox 🚀\nJust sent you the link in DM! 📩",
+                      d="Hey {username}! Thanks for reaching out.\nHere is the link: https://instagram.com/coded.ecoded\nLet us know if you need anything else! ✨")
+            except Exception as ex:
+                print("Rule seed notice:", ex)
+
         _db_ready = True
     except Exception as e:
         print("Database init notice:", e)
@@ -75,11 +127,6 @@ def check_db():
     init_db()
 
 # ---------- helpers ----------
-F = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest()))
-enc = lambda s: F.encrypt(s.encode()).decode()
-dec = lambda s: F.decrypt(s.encode()).decode()
-now = lambda: dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
 def log(ig, kind, msg, keyword="", who="", ref=""):
     q("insert into logs(ig_id,ts,kind,keyword,who,ref,msg) values(:i,:t,:k,:kw,:w,:r,:m)",
       i=ig, t=now(), k=kind, kw=keyword, w=who, r=ref, m=msg)
@@ -126,10 +173,13 @@ def home():
     if "ig" not in session and ig_id:
         tok = os.environ.get("PAGE_ACCESS_TOKEN", "")
         if tok:
-            q("""insert into users(ig_id,username,token) values(:i,:u,:t)
-                 on conflict(ig_id) do update set username=:u, token=:t""",
-              i=ig_id, u="coded.ecoded", t=enc(tok))
-            session["ig"] = ig_id
+            try:
+                q("""insert into users(ig_id,username,token) values(:i,:u,:t)
+                     on conflict(ig_id) do update set username=:u, token=:t""",
+                  i=ig_id, u="coded.ecoded", t=enc(tok))
+            except Exception as ex:
+                print("User upsert notice:", ex)
+        session["ig"] = ig_id
     return redirect("/dashboard") if "ig" in session else render_template_string(PAGE, user=None)
 
 @app.route("/login")
@@ -296,7 +346,7 @@ def refresh_tokens():
         if "access_token" in r: q("update users set token=:t where ig_id=:i", t=enc(r["access_token"]), i=u["ig_id"])
 
 sch = BackgroundScheduler()
-if not os.environ.get("VERCEL"):
+if not is_serverless:
     sch.add_job(publish_due, "interval", minutes=1)
     sch.add_job(refresh_tokens, "interval", days=30)
     try:
