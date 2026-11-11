@@ -169,10 +169,7 @@ def not_found(e):
 @app.route("/")
 def home():
     if request.args.get("debug"):
-        return jsonify({
-            k: v for k, v in request.environ.items() 
-            if isinstance(v, (str, int, float, bool)) and any(x in k.lower() for x in ["path", "uri", "matched", "url", "route", "forwarded"])
-        })
+        return jsonify({k: str(v) for k, v in request.environ.items()})
     ig_id = os.environ.get("IG_BUSINESS_ID")
     if "ig" not in session and ig_id:
         tok = os.environ.get("PAGE_ACCESS_TOKEN", "")
