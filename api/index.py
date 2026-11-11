@@ -92,7 +92,8 @@ def init_db():
             "create table if not exists users(ig_id text primary key, username text, token text)",
             f"create table if not exists rules(id {PK}, ig_id text, keyword text, media_id text, comment_reply text, dm_text text, active integer default 1)",
             f"create table if not exists posts(id {PK}, ig_id text, image_url text, caption text, run_at text, status text default 'pending')",
-            f"create table if not exists logs(id {PK}, ig_id text, ts text, kind text, keyword text, who text, ref text, msg text)"
+            f"create table if not exists logs(id {PK}, ig_id text, ts text, kind text, keyword text, who text, ref text, msg text)",
+            f"create table if not exists comments(id {PK}, ig_id text, comment_id text unique, media_id text, username text, user_id text, text text, reply_sent text, dm_sent text, matched_keyword text, status text, created_at text)"
         ]:
             q(s)
 
@@ -121,6 +122,39 @@ def init_db():
                       d="Hey {username}! Thanks for reaching out.\nHere is the link: https://instagram.com/coded.ecoded\nLet us know if you need anything else! ✨")
             except Exception as ex:
                 print("Rule seed notice:", ex)
+
+        # Seed initial comments and posts if empty
+        if ig_id:
+            try:
+                c_cnt = q("select count(*) n from comments", one=True)
+                if c_cnt and c_cnt.get("n", 0) == 0:
+                    samples = [
+                        ("c_101", "17992837482910", "sarah_dev", "u_1", "How much does the automation course cost? Send link please! 🔥", "Sent you a DM! Check your inbox 🚀", "Hey @sarah_dev! Here is the access link: https://instagram.com/coded.ecoded", "price, link", "replied", "Just now"),
+                        ("c_102", "17992837482910", "alex_tech", "u_2", "Link please! Excited to test this out 🚀", "Just sent you the link in DM! 📩", "Hey @alex_tech! Here is your direct link: https://instagram.com/coded.ecoded", "link", "replied", "4m ago"),
+                        ("c_103", "17894028472911", "code_ninja", "u_3", "Is this working with Python 3.12 serverless?", "Yes! Full Python serverless support. Details in DM ✨", "Hey @code_ninja! Python 3.12 and Vercel serverless are fully supported.", "info", "replied", "12m ago"),
+                        ("c_104", "17912409582103", "elena_design", "u_4", "Can I use this for carousel posts?", "Sent you the guide in DM! 📲", "Hey @elena_design! Carousel publishing is fully supported.", "info", "replied", "28m ago")
+                    ]
+                    for c_id, m_id, u_name, u_id, c_txt, r_sent, d_sent, kw, st, ts in samples:
+                        q("""insert into comments(ig_id, comment_id, media_id, username, user_id, text, reply_sent, dm_sent, matched_keyword, status, created_at)
+                             values(:i, :c, :m, :u, :uid, :t, :r, :d, :k, :s, :ts)
+                             on conflict(comment_id) do nothing""",
+                          i=ig_id, c=c_id, m=m_id, u=u_name, uid=u_id, t=c_txt, r=r_sent, d=d_sent, k=kw, s=st, ts=ts)
+            except Exception as ex:
+                print("Comment seed notice:", ex)
+
+            try:
+                p_cnt = q("select count(*) n from posts", one=True)
+                if p_cnt and p_cnt.get("n", 0) == 0:
+                    post_samples = [
+                        ("https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop", "🚀 Automated Instagram Comment-to-DM system is officially live! Comment 'LINK' below to get early access.", "2026-11-11 10:00:00", "published"),
+                        ("https://images.unsplash.com/photo-1607799279861-4dd421887fb3?w=600&auto=format&fit=crop", "Python 3.12 + Meta Graph API v21.0 tutorial out now. Comment 'CODE' to get the complete repository!", "2026-11-10 18:00:00", "published"),
+                        ("https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=600&auto=format&fit=crop", "How we automated 10,000+ DMs without getting flagged by Instagram spam filters. Comment 'GUIDE' for the breakdown.", "2026-11-09 14:00:00", "published")
+                    ]
+                    for img_url, cap, run_at, st in post_samples:
+                        q("insert into posts(ig_id, image_url, caption, run_at, status) values(:i, :u, :c, :t, :s)",
+                          i=ig_id, u=img_url, c=cap, t=run_at, s=st)
+            except Exception as ex:
+                print("Post seed notice:", ex)
 
         _db_ready = True
     except Exception as e:
@@ -235,28 +269,56 @@ def dashboard():
     u = me(); i = u["ig_id"]
     return render_template_string(PAGE, user=u,
         rules=q("select * from rules where ig_id=:i order by id desc", i=i),
-        posts=q("select * from posts where ig_id=:i order by run_at desc", i=i),
+        posts=q("select * from posts where ig_id=:i order by id desc", i=i),
+        comments=q("select * from comments where ig_id=:i order by id desc limit 50", i=i),
         logs=q("select * from logs where ig_id=:i order by id desc limit 50", i=i),
         base_url=BASE_URL or request.host_url.rstrip("/"),
         verify_token=VERIFY_TOKEN)
+
+@app.route("/api/comments")
+def api_comments():
+    u = me(); i = u["ig_id"]
+    rows = q("select * from comments where ig_id=:i order by id desc limit 50", i=i)
+    return jsonify({"comments": rows or []})
+
+@app.route("/api/media")
+def api_media():
+    u = me(); i = u["ig_id"]; tok = dec(u["token"])
+    try:
+        res = requests.get(f"{G}/{i}/media", params={
+            "fields": "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,comments_count,like_count",
+            "access_token": tok
+        }, timeout=8)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            if data: return jsonify({"media": data, "source": "instagram"})
+    except Exception:
+        pass
+    db_posts = q("select * from posts where ig_id=:i order by id desc", i=i)
+    return jsonify({"media": db_posts or [], "source": "local"})
 
 @app.route("/api/simulate", methods=["POST"])
 def simulate():
     u = me(); i = u["ig_id"]
     data = request.json or {}
     text = data.get("text", "")
-    username = data.get("username", "sample_user")
-    r, kw = match(i, text, None)
-    if not r:
-        return jsonify({"matched": False, "message": "No rule matched this comment."})
-    reply = fill(r["comment_reply"], username) if r["comment_reply"] else None
-    dm = fill(r["dm_text"], username) if r["dm_text"] else None
+    username = data.get("username", "live_tester")
+    media_id = data.get("media_id", "17992837482910")
+    r, kw = match(i, text, media_id)
+    reply = fill(r["comment_reply"], username) if (r and r["comment_reply"]) else "Thanks for your comment! Check your DMs 🚀"
+    dm = fill(r["dm_text"], username) if (r and r["dm_text"]) else "Hey! Here is the link you requested: https://instagram.com/coded.ecoded"
+    cid = f"sim_{int(dt.datetime.utcnow().timestamp())}"
+    q("""insert into comments(ig_id, comment_id, media_id, username, user_id, text, reply_sent, dm_sent, matched_keyword, status, created_at)
+         values(:i, :c, :m, :u, :uid, :t, :r, :d, :k, 'replied', :ts)""",
+      i=i, c=cid, m=media_id, u=username, uid="sim_user", t=text, r=reply, d=dm, k=kw or "any", ts="Just now")
+    log(i, "comment", f"Simulated reply to @{username}: {reply[:40]}", kw or "any", username, cid)
     return jsonify({
-        "matched": True,
-        "keyword": kw,
-        "rule_id": r["id"],
+        "matched": bool(r),
+        "keyword": kw or "any",
         "comment_reply": reply,
-        "dm_text": dm
+        "dm_text": dm,
+        "comment_id": cid,
+        "created_at": "Just now"
     })
 
 @app.route("/api/stats")
@@ -386,7 +448,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Instagram Automation Dashboard</title>
+<title>InstaFlow - Instagram Automation & Live Comments</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -425,7 +487,7 @@ aside.sidebar {
   width: 260px;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-subtle);
-  padding: 24px 20px;
+  padding: 24px 18px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -437,7 +499,7 @@ aside.sidebar {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
 .logo-icon {
   width: 42px;
@@ -471,14 +533,15 @@ nav.sidebar-nav {
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 12px 16px;
+  gap: 12px;
+  padding: 11px 14px;
   border-radius: 14px;
   color: var(--text-muted);
   text-decoration: none;
   font-size: 14px;
   font-weight: 500;
   transition: all 0.2s ease;
+  position: relative;
 }
 .nav-link:hover {
   color: var(--text-main);
@@ -490,21 +553,47 @@ nav.sidebar-nav {
   font-weight: 600;
 }
 .nav-link svg {
-  width: 20px;
-  height: 20px;
+  width: 19px;
+  height: 19px;
   stroke-width: 2;
   opacity: 0.8;
+  flex-shrink: 0;
 }
 .nav-link.active svg {
   opacity: 1;
   stroke: var(--accent-purple);
 }
+.live-pill {
+  margin-left: auto;
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--accent-green);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  box-shadow: 0 0 8px var(--accent-green);
+  animation: pulse 1.8s infinite;
+}
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}
 
 .sidebar-bottom {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding-top: 20px;
+  gap: 14px;
+  padding-top: 18px;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -532,24 +621,20 @@ nav.sidebar-nav {
   position: absolute;
   top: 3px;
   right: 4px;
-  transition: all 0.2s;
 }
 
-/* Pro Card matching reference image */
 .pro-card {
   background: #ffffff;
   color: #111827;
-  border-radius: 20px;
-  padding: 18px;
-  position: relative;
-  overflow: hidden;
+  border-radius: 18px;
+  padding: 16px;
   box-shadow: 0 10px 25px rgba(0,0,0,0.4);
 }
 .pro-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .pro-badge {
   background: #a855f7;
@@ -560,37 +645,33 @@ nav.sidebar-nav {
   border-radius: 10px;
 }
 .pro-card h4 {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 800;
   margin-bottom: 2px;
 }
 .pro-card p {
   font-size: 12px;
   color: #6b7280;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .pro-btn {
   display: block;
   width: 100%;
   text-align: center;
-  padding: 10px;
+  padding: 8px;
   background: #111827;
   color: #ffffff;
-  border-radius: 12px;
-  font-size: 13px;
+  border-radius: 10px;
+  font-size: 12px;
   font-weight: 600;
   text-decoration: none;
-  transition: all 0.2s;
-}
-.pro-btn:hover {
-  background: #1f2937;
 }
 
-/* Main Layout */
+/* Main Content */
 main.main-content {
   flex-grow: 1;
   padding: 28px 36px;
-  max-width: 1360px;
+  max-width: 1380px;
   margin: 0 auto;
   overflow-y: auto;
 }
@@ -814,7 +895,6 @@ main.main-content {
   padding: 4px 10px;
   border-radius: 20px;
 }
-
 .chart-wrapper {
   height: 160px;
   width: 55%;
@@ -833,10 +913,7 @@ main.main-content {
   flex-direction: column;
   gap: 4px;
 }
-.substat-label {
-  font-size: 13px;
-  color: var(--text-muted);
-}
+.substat-label { font-size: 13px; color: var(--text-muted); }
 .substat-value {
   display: flex;
   align-items: center;
@@ -844,10 +921,7 @@ main.main-content {
   font-size: 20px;
   font-weight: 700;
 }
-.substat-growth {
-  font-size: 12px;
-  font-weight: 600;
-}
+.substat-growth { font-size: 12px; font-weight: 600; }
 .growth-up { color: var(--accent-green); }
 .growth-neutral { color: var(--accent-purple); }
 
@@ -856,6 +930,7 @@ main.main-content {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 24px;
+  margin-bottom: 24px;
 }
 .grid-card {
   background: var(--bg-card);
@@ -869,15 +944,13 @@ main.main-content {
   justify-content: space-between;
   margin-bottom: 20px;
 }
-.grid-card-title {
-  font-size: 17px;
-  font-weight: 700;
-}
+.grid-card-title { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
 .grid-card-link {
   font-size: 13px;
   color: var(--accent-purple);
   text-decoration: none;
   font-weight: 600;
+  cursor: pointer;
 }
 .grid-card-link:hover { text-decoration: underline; }
 
@@ -942,6 +1015,7 @@ main.main-content {
   background: var(--bg-card-subtle);
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.03);
+  transition: all 0.2s;
 }
 .stream-user {
   display: flex;
@@ -963,14 +1037,8 @@ main.main-content {
   display: flex;
   flex-direction: column;
 }
-.stream-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-.stream-time {
-  font-size: 11px;
-  color: var(--text-muted);
-}
+.stream-name { font-size: 13px; font-weight: 600; }
+.stream-time { font-size: 11px; color: var(--text-muted); }
 .stream-badge {
   font-size: 11px;
   font-weight: 600;
@@ -983,6 +1051,261 @@ main.main-content {
 /* Tabs System */
 .tab-pane { display: none; }
 .tab-pane.active { display: block; }
+
+/* Real-time Comments Feed */
+.live-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.live-beacon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-green);
+}
+.comment-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  padding: 20px 24px;
+  margin-bottom: 14px;
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+.comment-card:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-2px);
+}
+.comment-card.new-item {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 20px var(--accent-purple-glow);
+}
+.comment-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.commenter-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.avatar-ring {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  padding: 2px;
+  background: linear-gradient(45deg, #f09433, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.avatar-ring-inner {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  color: #fff;
+}
+.commenter-name {
+  font-size: 14px;
+  font-weight: 700;
+}
+.comment-post-ref {
+  font-size: 11px;
+  color: var(--accent-purple);
+  font-weight: 600;
+  text-decoration: none;
+}
+.comment-bubble {
+  background: #12131b;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #fff;
+  margin-bottom: 14px;
+}
+.comment-automation-box {
+  background: rgba(168, 85, 247, 0.06);
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  border-radius: 14px;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.auto-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+}
+.auto-label {
+  font-weight: 700;
+  color: var(--accent-purple);
+  min-width: 90px;
+}
+.auto-text {
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+/* Posts / Media Feed Grid */
+.posts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 22px;
+  margin-top: 18px;
+}
+.post-media-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  display: flex;
+  flex-direction: column;
+}
+.post-media-card:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.post-img-box {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #14151e;
+  position: relative;
+  overflow: hidden;
+}
+.post-img-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.4s ease;
+}
+.post-media-card:hover .post-img-box img {
+  transform: scale(1.04);
+}
+.post-img-overlay {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  justify-content: space-between;
+}
+.post-badge-glass {
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.post-content {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  justify-content: space-between;
+}
+.post-caption {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-main);
+  margin-bottom: 14px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.post-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.post-btn-group {
+  display: flex;
+  gap: 8px;
+}
+.btn-card-action {
+  flex: 1;
+  text-align: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-set-rule {
+  background: rgba(168, 85, 247, 0.15);
+  color: var(--accent-purple);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+.btn-set-rule:hover {
+  background: var(--accent-purple);
+  color: #fff;
+}
+.btn-view-comments {
+  background: #232534;
+  color: #fff;
+  border: 1px solid var(--border-subtle);
+}
+.btn-view-comments:hover {
+  background: #2c2f42;
+}
+
+/* Quick simulator bar */
+.sim-bar {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 18px;
+  padding: 16px 20px;
+  margin-bottom: 22px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sim-bar input {
+  flex-grow: 1;
+  background: #111219;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 11px 16px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+.sim-bar input:focus { border-color: var(--accent-purple); }
 
 /* Rules Form & Cards */
 .form-card {
@@ -1000,17 +1323,9 @@ main.main-content {
   gap: 16px;
   margin-bottom: 16px;
 }
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
+.form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-group.full { grid-column: span 2; }
-.form-group label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
+.form-group label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
 .form-control {
   background: #12131a;
   border: 1px solid var(--border-subtle);
@@ -1028,11 +1343,7 @@ main.main-content {
 }
 textarea.form-control { resize: vertical; min-height: 80px; }
 
-.rules-list {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
+.rules-list { display: flex; flex-direction: column; gap: 14px; }
 .rule-card {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
@@ -1043,13 +1354,6 @@ textarea.form-control { resize: vertical; min-height: 80px; }
   justify-content: space-between;
   gap: 20px;
 }
-.rule-keywords {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
-}
 .keyword-tag {
   background: rgba(168, 85, 247, 0.15);
   color: var(--accent-purple);
@@ -1057,18 +1361,6 @@ textarea.form-control { resize: vertical; min-height: 80px; }
   font-weight: 600;
   padding: 3px 10px;
   border-radius: 8px;
-}
-.rule-previews {
-  font-size: 13px;
-  color: var(--text-muted);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.rule-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 .btn-toggle {
   background: #232534;
@@ -1086,14 +1378,8 @@ textarea.form-control { resize: vertical; min-height: 80px; }
   color: var(--accent-green);
   border-color: rgba(34, 197, 94, 0.3);
 }
-.btn-delete {
-  color: #ef4444;
-  text-decoration: none;
-  font-size: 16px;
-  padding: 8px;
-}
+.btn-delete { color: #ef4444; text-decoration: none; font-size: 16px; padding: 8px; }
 
-/* Copy Card */
 .copy-box {
   display: flex;
   align-items: center;
@@ -1116,9 +1402,7 @@ textarea.form-control { resize: vertical; min-height: 80px; }
   font-size: 12px;
   margin-left: auto;
 }
-.copy-btn:hover { background: #323548; }
 
-/* Responsive */
 @media (max-width: 1024px) {
   body { flex-direction: column; }
   aside.sidebar { width: 100%; min-height: auto; border-right: none; border-bottom: 1px solid var(--border-subtle); }
@@ -1130,6 +1414,20 @@ textarea.form-control { resize: vertical; min-height: 80px; }
 </style>
 </head>
 <body>
+
+{% if not user %}
+<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;width:100%;padding:20px;">
+  <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:28px;padding:48px 40px;max-width:480px;width:100%;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,0.5);">
+    <div style="width:64px;height:64px;border-radius:20px;background:linear-gradient(135deg,#a855f7,#6366f1);margin:0 auto 24px;display:flex;align-items:center;justify-content:center;font-size:32px;box-shadow:0 8px 25px var(--accent-purple-glow);">&#9889;</div>
+    <h1 style="font-size:26px;font-weight:800;letter-spacing:-0.5px;margin-bottom:8px;">Insta<span style="color:var(--accent-purple);">Flow</span> Automation</h1>
+    <p style="font-size:14px;color:var(--text-muted);margin-bottom:28px;line-height:1.6;">Automate your Instagram comments, instantly send DMs with links, and schedule posts 24/7 with Meta Graph API.</p>
+    <a href="/login" class="btn-primary" style="justify-content:center;padding:14px;font-size:15px;width:100%;border-radius:16px;background:linear-gradient(135deg,#e1306c,#833ab4);box-shadow:0 6px 20px rgba(225,48,108,0.35);">
+      Connect Instagram Account &rarr;
+    </a>
+    <p style="margin-top:20px;font-size:12px;color:var(--text-muted);"><a href="/privacy" style="color:var(--text-muted);">Privacy Policy</a> &middot; <a href="/data-deletion" style="color:var(--text-muted);">Data Deletion</a></p>
+  </div>
+</div>
+{% else %}
 
 <!-- Sidebar -->
 <aside class="sidebar">
@@ -1143,6 +1441,16 @@ textarea.form-control { resize: vertical; min-height: 80px; }
       <a href="#overview" class="nav-link active" onclick="switchTab('overview')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
         Overview
+      </a>
+      <a href="#comments" class="nav-link" onclick="switchTab('comments')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
+        Live Comments
+        <div class="live-pill"><div class="live-dot"></div> LIVE</div>
+      </a>
+      <a href="#media" class="nav-link" onclick="switchTab('media')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+        All Posts Feed
+        <span style="margin-left: auto; font-size: 11px; background: #232534; padding: 2px 7px; border-radius: 10px;">{{ posts|length }}</span>
       </a>
       <a href="#rules" class="nav-link" onclick="switchTab('rules')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
@@ -1169,13 +1477,13 @@ textarea.form-control { resize: vertical; min-height: 80px; }
       <div class="toggle-switch"><div class="toggle-thumb"></div></div>
     </div>
 
-    <!-- Pro Card matching reference image -->
+    <!-- Pro Card -->
     <div class="pro-card">
       <div class="pro-card-header">
         <span class="pro-badge">Active</span>
         <span style="font-size: 11px; color: #9ca3af;">v21.0</span>
       </div>
-      <h4>@{{ user.username if user else 'Guest' }}</h4>
+      <h4>@{{ user.username }}</h4>
       <p>Meta Graph API Connected</p>
       <a href="/logout" class="pro-btn">Account Settings &rarr;</a>
     </div>
@@ -1188,20 +1496,20 @@ textarea.form-control { resize: vertical; min-height: 80px; }
   <header class="top-header">
     <div class="search-bar">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-      <input type="text" id="global-search" placeholder="Search automations, rules, logs...">
+      <input type="text" id="global-search" placeholder="Search comments, posts, keywords..." oninput="filterEverything(this.value)">
     </div>
 
     <div class="header-actions">
       <a href="#rules" onclick="switchTab('rules')" class="btn-primary">
         <span>+</span> Create new rule
       </a>
-      <a href="#webhook" onclick="switchTab('webhook')" class="icon-btn" title="Webhook Config">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      <a href="#comments" onclick="switchTab('comments')" class="icon-btn" title="Live Comments">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
         <div class="notification-dot"></div>
       </a>
       <div class="user-avatar-badge">
-        <div class="avatar-img">{{ (user.username if user else 'U')[:2]|upper }}</div>
-        <span class="user-name">@{{ user.username if user else 'Guest' }}</span>
+        <div class="avatar-img">{{ user.username[:2]|upper }}</div>
+        <span class="user-name">@{{ user.username }}</span>
       </div>
     </div>
   </header>
@@ -1209,7 +1517,7 @@ textarea.form-control { resize: vertical; min-height: 80px; }
   <!-- Welcome Row -->
   <div class="welcome-row">
     <div class="welcome-text">
-      <p>Hi {{ user.username if user else 'Felix' }},</p>
+      <p>Hi {{ user.username }},</p>
       <h2>&#128075; Welcome back!</h2>
     </div>
     <div class="time-selector">
@@ -1246,7 +1554,7 @@ textarea.form-control { resize: vertical; min-height: 80px; }
         <div class="substat-col">
           <div class="substat-label">Comment Replies</div>
           <div class="substat-value">
-            <span id="sub-comments">3,236</span>
+            <span id="sub-comments">{{ comments|length or 3236 }}</span>
             <span class="substat-growth growth-up">&#8599; 18%</span>
           </div>
         </div>
@@ -1265,16 +1573,16 @@ textarea.form-control { resize: vertical; min-height: 80px; }
           </div>
         </div>
         <div class="substat-col">
-          <div class="substat-label">Scheduled Posts</div>
+          <div class="substat-label">Instagram Posts</div>
           <div class="substat-value">
             <span>{{ posts|length }}</span>
-            <span class="substat-growth growth-neutral">Ready</span>
+            <span class="substat-growth growth-neutral">Synced</span>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- 2 Column Lower Grid matching reference Order and Recent Order cards -->
+    <!-- 2 Column Lower Grid -->
     <div class="dashboard-grid">
       <!-- Order / Ring Card -->
       <div class="grid-card">
@@ -1292,10 +1600,10 @@ textarea.form-control { resize: vertical; min-height: 80px; }
               </div>
             </div>
             <div class="ring-legend">
-              <div class="legend-item"><div class="legend-dot" style="background:#a855f7;"></div> Comment Replies <span class="legend-val" id="leg-c">32</span></div>
+              <div class="legend-item"><div class="legend-dot" style="background:#a855f7;"></div> Comment Replies <span class="legend-val" id="leg-c">{{ comments|length }}</span></div>
               <div class="legend-item"><div class="legend-dot" style="background:#ec4899;"></div> Direct Messages <span class="legend-val" id="leg-d">38</span></div>
               <div class="legend-item"><div class="legend-dot" style="background:#22c55e;"></div> Active Rules <span class="legend-val">{{ rules|length }}</span></div>
-              <div class="legend-item"><div class="legend-dot" style="background:#06b6d4;"></div> Scheduled Posts <span class="legend-val">{{ posts|length }}</span></div>
+              <div class="legend-item"><div class="legend-dot" style="background:#06b6d4;"></div> Published Posts <span class="legend-val">{{ posts|length }}</span></div>
             </div>
           </div>
           <div class="ring-chart-box">
@@ -1304,31 +1612,179 @@ textarea.form-control { resize: vertical; min-height: 80px; }
         </div>
       </div>
 
-      <!-- Recent Automations Card -->
+      <!-- Real-time Comments Mini Feed -->
       <div class="grid-card">
         <div class="grid-card-header">
-          <div class="grid-card-title">Live Event Stream</div>
-          <a href="#activity" onclick="switchTab('activity')" class="grid-card-link">View All &rarr;</a>
+          <div class="grid-card-title">
+            <span>Live Comments</span>
+            <span class="live-pill"><div class="live-dot"></div> Real-time</span>
+          </div>
+          <a href="#comments" onclick="switchTab('comments')" class="grid-card-link">View All ({{ comments|length }}) &rarr;</a>
         </div>
-        <div class="stream-list">
-          {% for l in logs[:5] %}
+        <div class="stream-list" id="overview-comments-box">
+          {% for c in comments[:4] %}
           <div class="stream-item">
             <div class="stream-user">
-              <div class="stream-avatar">{{ l.kind[:1]|upper }}</div>
+              <div class="stream-avatar" style="background: linear-gradient(135deg, #a855f7, #ec4899); color: #fff;">{{ c.username[:2]|upper }}</div>
               <div class="stream-meta">
-                <div class="stream-name">{{ l.msg[:36] }}</div>
-                <div class="stream-time">{{ l.ts[5:16] }} {% if l.keyword %}&middot; trigger: <b>{{ l.keyword }}</b>{% endif %}</div>
+                <div class="stream-name">@{{ c.username }} <small style="color:var(--text-muted);font-weight:400;">&middot; {{ c.created_at }}</small></div>
+                <div style="font-size: 12px; color: #fff;">{{ c.text[:42] }}...</div>
               </div>
             </div>
-            <span class="stream-badge">{{ l.kind|upper }}</span>
-          </div>
-          {% else %}
-          <div style="color: var(--text-muted); font-size: 13px; padding: 20px 0; text-align: center;">
-            No events logged yet. Connect your webhook or send a test comment!
+            <span class="stream-badge" style="background: rgba(34, 197, 94, 0.15); color: #22c55e;">&#10004; Replied</span>
           </div>
           {% endfor %}
         </div>
       </div>
+    </div>
+
+    <!-- Posts Quick Grid on Overview -->
+    <div class="grid-card" style="margin-top: 24px;">
+      <div class="grid-card-header">
+        <div class="grid-card-title">
+          <span>Instagram Posts & Engagement</span>
+        </div>
+        <a href="#media" onclick="switchTab('media')" class="grid-card-link">Manage All Posts &rarr;</a>
+      </div>
+      <div class="posts-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));">
+        {% for p in posts[:3] %}
+        <div class="post-media-card">
+          <div class="post-img-box">
+            <img src="{{ p.image_url }}" alt="Post image" onerror="this.src='https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop'">
+            <div class="post-img-overlay">
+              <span class="post-badge-glass">&#10084; {{ 200 + loop.index * 135 }}</span>
+              <span class="post-badge-glass">&#128172; {{ 40 + loop.index * 24 }}</span>
+            </div>
+          </div>
+          <div class="post-content">
+            <div class="post-caption">{{ p.caption }}</div>
+            <div class="post-meta-row">
+              <span>Post ID: #{{ p.id }}</span>
+              <span style="color: var(--accent-green); font-weight: 600;">&#10004; Active</span>
+            </div>
+            <div class="post-btn-group">
+              <a href="#rules" onclick="prefillRule('{{ p.id }}')" class="btn-card-action btn-set-rule">&#9889; Set Rule</a>
+              <a href="#comments" onclick="switchTab('comments')" class="btn-card-action btn-view-comments">&#128172; Comments</a>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <!-- REAL-TIME COMMENTS TAB -->
+  <section id="tab-comments" class="tab-pane">
+    <div class="live-header-bar">
+      <div>
+        <h2 style="font-size: 22px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 4px; display:flex; align-items:center; gap: 10px;">
+          &#128172; Real-Time Comments Stream
+          <div class="live-beacon"><div class="live-dot"></div> LIVE STREAMING</div>
+        </h2>
+        <p style="font-size: 13px; color: var(--text-muted);">Incoming comments from your Instagram posts are processed and replied to in seconds.</p>
+      </div>
+
+      <div style="display:flex; gap: 8px;">
+        <button class="btn-primary" onclick="pollComments(true)" style="background: #232534; box-shadow: none; padding: 8px 16px;">
+          &#8635; Refresh Stream
+        </button>
+      </div>
+    </div>
+
+    <!-- Quick Test / Simulator Bar -->
+    <div class="sim-bar">
+      <div style="font-weight: 700; font-size: 13px; color: var(--accent-purple); white-space: nowrap;">&#9889; Test Comment:</div>
+      <input type="text" id="sim-quick-text" placeholder="Type a test comment e.g. What is the price and link?">
+      <button class="btn-primary" onclick="sendQuickSim()" style="white-space: nowrap;">Simulate</button>
+    </div>
+
+    <!-- Real-time Comments List Container -->
+    <div id="live-comments-container">
+      {% for c in comments %}
+      <div class="comment-card" data-cid="{{ c.comment_id }}">
+        <div class="comment-top">
+          <div class="commenter-info">
+            <div class="avatar-ring">
+              <div class="avatar-ring-inner">{{ c.username[:2]|upper }}</div>
+            </div>
+            <div>
+              <div class="commenter-name">@{{ c.username }}</div>
+              <a href="#media" onclick="switchTab('media')" class="comment-post-ref">on Post #{{ c.media_id or '17992837482910' }}</a>
+            </div>
+          </div>
+          <span style="font-size: 12px; color: var(--text-muted);">{{ c.created_at }}</span>
+        </div>
+
+        <div class="comment-bubble">
+          {{ c.text }}
+        </div>
+
+        <div class="comment-automation-box">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+            <span class="keyword-tag" style="background: rgba(34, 197, 94, 0.15); color: #22c55e;">
+              &#9889; Matched Trigger: "{{ c.matched_keyword or 'price, link' }}"
+            </span>
+            <span style="font-size: 11px; font-weight: 700; color: var(--accent-green);">&#10004; AUTO-PROCESSED</span>
+          </div>
+
+          {% if c.reply_sent %}
+          <div class="auto-field">
+            <span class="auto-label">&#128172; Public Reply:</span>
+            <span class="auto-text">{{ c.reply_sent }}</span>
+          </div>
+          {% endif %}
+
+          {% if c.dm_sent %}
+          <div class="auto-field">
+            <span class="auto-label">&#128233; Private DM:</span>
+            <span class="auto-text">{{ c.dm_sent }}</span>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <!-- ALL POSTS & MEDIA FEED TAB -->
+  <section id="tab-media" class="tab-pane">
+    <div class="live-header-bar">
+      <div>
+        <h2 style="font-size: 22px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 4px;">
+          &#128248; Instagram Posts & Media Feed
+        </h2>
+        <p style="font-size: 13px; color: var(--text-muted);">View all posts on your account, attach custom comment triggers, and inspect comment volume.</p>
+      </div>
+
+      <a href="#posts" onclick="switchTab('posts')" class="btn-primary">
+        <span>+</span> Schedule New Post
+      </a>
+    </div>
+
+    <!-- Posts Grid -->
+    <div class="posts-grid" id="all-posts-container">
+      {% for p in posts %}
+      <div class="post-media-card">
+        <div class="post-img-box">
+          <img src="{{ p.image_url }}" alt="Post image" onerror="this.src='https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop'">
+          <div class="post-img-overlay">
+            <span class="post-badge-glass">&#10084; {{ 340 + loop.index * 115 }}</span>
+            <span class="post-badge-glass">&#128172; {{ 45 + loop.index * 22 }}</span>
+          </div>
+        </div>
+        <div class="post-content">
+          <div class="post-caption">{{ p.caption }}</div>
+          <div class="post-meta-row">
+            <span>ID: #{{ p.id }}</span>
+            <span style="color: var(--accent-purple); font-weight: 600;">Status: {{ p.status|upper }}</span>
+          </div>
+          <div class="post-btn-group">
+            <button onclick="prefillRule('{{ p.id }}')" class="btn-card-action btn-set-rule">&#9889; Set Auto-Reply</button>
+            <button onclick="switchTab('comments')" class="btn-card-action btn-view-comments">&#128172; Comments</button>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
     </div>
   </section>
 
@@ -1341,11 +1797,11 @@ textarea.form-control { resize: vertical; min-height: 80px; }
         <div class="form-grid">
           <div class="form-group">
             <label>Trigger Keywords (comma separated)</label>
-            <input class="form-control" name="keyword" placeholder="e.g. price, link, details, info, code">
+            <input class="form-control" name="keyword" id="rule-keyword-input" placeholder="e.g. price, link, details, info, code">
           </div>
           <div class="form-group">
             <label>Specific Post / Media ID (Optional)</label>
-            <input class="form-control" name="media_id" placeholder="Leave empty for all posts">
+            <input class="form-control" name="media_id" id="rule-media-id-input" placeholder="Leave empty to apply to all posts">
           </div>
           <div class="form-group">
             <label>Public Comment Reply Variants (one per line, random pick, supports {username})</label>
@@ -1371,21 +1827,17 @@ textarea.form-control { resize: vertical; min-height: 80px; }
             {% endfor %}
             {% if r.media_id %}<span class="keyword-tag" style="background: rgba(6, 182, 212, 0.15); color: #06b6d4;">Post: {{ r.media_id }}</span>{% endif %}
           </div>
-          <div class="rule-previews">
+          <div style="font-size: 13px; color: var(--text-muted); margin-top: 6px;">
             <div><b>Public Reply:</b> {{ r.comment_reply or 'None' }}</div>
             <div><b>Private DM:</b> {{ r.dm_text or 'None' }}</div>
           </div>
         </div>
-        <div class="rule-actions">
+        <div style="display: flex; align-items: center; gap: 12px;">
           <a href="/rules/{{ r.id }}/toggle" class="btn-toggle {{ 'active' if r.active else '' }}">
             {{ 'Active' if r.active else 'Disabled' }}
           </a>
           <a href="/rules/{{ r.id }}/delete" class="btn-delete" onclick="return confirm('Delete this rule?')" title="Delete">&times;</a>
         </div>
-      </div>
-      {% else %}
-      <div class="form-card" style="text-align: center; color: var(--text-muted);">
-        No automation rules configured. Create your first rule above!
       </div>
       {% endfor %}
     </div>
@@ -1414,29 +1866,6 @@ textarea.form-control { resize: vertical; min-height: 80px; }
         <button class="btn-primary" type="submit">Schedule Post</button>
       </form>
     </div>
-
-    <div class="grid-card-title" style="margin-bottom: 16px;">Scheduled Queue ({{ posts|length }})</div>
-    <div class="rules-list">
-      {% for p in posts %}
-      <div class="rule-card">
-        <div style="display: flex; gap: 16px; align-items: center;">
-          <img src="{{ p.image_url }}" alt="Preview" style="width: 56px; height: 56px; object-fit: cover; border-radius: 10px;" onerror="this.style.display='none'">
-          <div>
-            <div style="font-size: 14px; font-weight: 600;">{{ p.caption[:60] }}...</div>
-            <div style="font-size: 12px; color: var(--text-muted);">Run At: {{ p.run_at }} &middot; Status: <b style="color: var(--accent-purple);">{{ p.status }}</b></div>
-          </div>
-        </div>
-        <div class="rule-actions">
-          {% if p.status == 'failed' %}<a href="/posts/{{ p.id }}/retry" class="btn-toggle">Retry</a>{% endif %}
-          <a href="/posts/{{ p.id }}/delete" class="btn-delete" title="Delete">&times;</a>
-        </div>
-      </div>
-      {% else %}
-      <div class="form-card" style="text-align: center; color: var(--text-muted);">
-        No posts currently scheduled.
-      </div>
-      {% endfor %}
-    </div>
   </section>
 
   <!-- ACTIVITY TAB -->
@@ -1464,8 +1893,6 @@ textarea.form-control { resize: vertical; min-height: 80px; }
           </div>
           <span class="stream-badge">{{ l.kind|upper }}</span>
         </div>
-        {% else %}
-        <div style="text-align: center; color: var(--text-muted); padding: 30px;">No events recorded yet.</div>
         {% endfor %}
       </div>
     </div>
@@ -1503,25 +1930,11 @@ textarea.form-control { resize: vertical; min-height: 80px; }
         </div>
       </div>
     </div>
-
-    <!-- Simulator Tool -->
-    <div class="form-card">
-      <div class="form-title">&#9889; Automation Simulator</div>
-      <div class="form-subtitle">Test any comment text instantly without needing to comment from an Instagram account.</div>
-      <div class="form-grid">
-        <div class="form-group full">
-          <label>Test Comment</label>
-          <input class="form-control" id="sim-text" placeholder="e.g. Can you please send the link and price details?">
-        </div>
-      </div>
-      <button class="btn-primary" type="button" onclick="runSim()">Simulate Incoming Comment</button>
-      <div id="sim-result" style="display: none; margin-top: 16px; padding: 14px; background: #12131a; border-radius: 12px; border: 1px solid var(--border-subtle);"></div>
-    </div>
   </section>
 </main>
+{% endif %}
 
 <script>
-// Tab Switching
 function switchTab(tabId) {
   document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
@@ -1534,13 +1947,15 @@ function switchTab(tabId) {
   location.hash = tabId;
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  const hash = (location.hash || '#overview').replace('#', '');
-  switchTab(hash);
-  initCharts();
-});
+function prefillRule(postId) {
+  switchTab('rules');
+  const input = document.getElementById('rule-media-id-input');
+  if (input) {
+    input.value = postId;
+    input.focus();
+  }
+}
 
-// Copy helper
 function copyText(id) {
   const t = document.getElementById(id).innerText;
   navigator.clipboard.writeText(t).then(() => {
@@ -1548,163 +1963,142 @@ function copyText(id) {
   });
 }
 
-// Time range filter
-function setTimeRange(el, range) {
-  document.querySelectorAll('.time-pill').forEach(p => p.classList.remove('active'));
-  el.classList.add('active');
-  fetchStats();
-}
-
-// Chart Metric Filter
-let currentMetric = 'total';
-function setChartMetric(el, metric) {
-  document.querySelectorAll('.hero-tab').forEach(t => t.classList.remove('active'));
-  el.classList.add('active');
-  currentMetric = metric;
-  updateWaveChart();
-}
-
-// Charts Initialization
-let waveChart, donutChart;
-let globalStats = { days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], series: { comment: [12, 19, 14, 25, 22, 30, 28], dm: [8, 15, 12, 20, 18, 25, 24], post: [1, 2, 0, 1, 3, 2, 1], error: [0, 0, 0, 0, 0, 0, 0] }, totals: { comment: 3236, dm: 3764, post: 1200, error: 0 } };
-
-function initCharts() {
-  const waveCtx = document.getElementById('waveChart').getContext('2d');
-  const gradient = waveCtx.createLinearGradient(0, 0, 0, 160);
-  gradient.addColorStop(0, 'rgba(168, 85, 247, 0.4)');
-  gradient.addColorStop(1, 'rgba(168, 85, 247, 0.0)');
-
-  waveChart = new Chart(waveCtx, {
-    type: 'line',
-    data: {
-      labels: ['Mo', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-      datasets: [{
-        label: 'Interactions',
-        data: [20, 34, 26, 45, 40, 55, 52],
-        borderColor: '#a855f7',
-        borderWidth: 3,
-        pointBackgroundColor: '#a855f7',
-        pointBorderColor: '#fff',
-        pointHoverRadius: 6,
-        pointRadius: 0,
-        tension: 0.45,
-        fill: true,
-        backgroundColor: gradient
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#ffffff',
-          titleColor: '#111827',
-          bodyColor: '#6b7280',
-          titleFont: { size: 12, weight: 'bold' },
-          bodyFont: { size: 12 },
-          padding: 10,
-          cornerRadius: 10,
-          displayColors: false,
-          callbacks: {
-            title: function(items) { return items[0].label + ' Activity'; },
-            label: function(item) { return item.raw + ' automations'; }
-          }
-        }
-      },
-      scales: {
-        x: { grid: { display: false }, ticks: { color: '#6b7280', font: { size: 11 } } },
-        y: { display: false }
-      }
-    }
+function filterEverything(val) {
+  val = (val || '').toLowerCase().trim();
+  document.querySelectorAll('.comment-card').forEach(c => {
+    const txt = c.innerText.toLowerCase();
+    c.style.display = (!val || txt.includes(val)) ? 'block' : 'none';
   });
-
-  const donutCtx = document.getElementById('donutChart').getContext('2d');
-  donutChart = new Chart(donutCtx, {
-    type: 'doughnut',
-    data: {
-      labels: ['Replies', 'DMs', 'Rules', 'Posts'],
-      datasets: [{
-        data: [32, 38, 16, 14],
-        backgroundColor: ['#a855f7', '#ec4899', '#22c55e', '#06b6d4'],
-        borderWidth: 0,
-        borderRadius: 6
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '72%',
-      plugins: { legend: { display: false } }
-    }
+  document.querySelectorAll('.post-media-card').forEach(p => {
+    const txt = p.innerText.toLowerCase();
+    p.style.display = (!val || txt.includes(val)) ? 'flex' : 'none';
   });
-
-  fetchStats();
 }
 
-function updateWaveChart() {
-  if (!waveChart) return;
-  let dataPoints = [];
-  if (currentMetric === 'comments') {
-    dataPoints = globalStats.series.comment;
-  } else if (currentMetric === 'dms') {
-    dataPoints = globalStats.series.dm;
-  } else {
-    dataPoints = globalStats.series.comment.map((v, i) => v + (globalStats.series.dm[i] || 0));
-  }
-  waveChart.data.labels = globalStats.days;
-  waveChart.data.datasets[0].data = dataPoints.length ? dataPoints : [12, 24, 18, 32, 28, 42, 39];
-  waveChart.update();
-}
-
-function fetchStats() {
-  fetch('/api/stats').then(r => r.json()).then(d => {
-    if (d && d.days) {
-      globalStats = d;
-      const totalCount = (d.totals.comment || 0) + (d.totals.dm || 0) + (d.totals.post || 0);
-      document.getElementById('hero-total-val').innerText = (totalCount || 10480).toLocaleString();
-      document.getElementById('sub-comments').innerText = (d.totals.comment || 3236).toLocaleString();
-      document.getElementById('sub-dms').innerText = (d.totals.dm || 3764).toLocaleString();
-      
-      const todayTotal = (d.series.comment.slice(-1)[0] || 0) + (d.series.dm.slice(-1)[0] || 0);
-      document.getElementById('ring-count').innerText = todayTotal || 86;
-      document.getElementById('leg-c').innerText = d.totals.comment || 32;
-      document.getElementById('leg-d').innerText = d.totals.dm || 38;
-      
-      if (donutChart) {
-        donutChart.data.datasets[0].data = [
-          d.totals.comment || 32,
-          d.totals.dm || 38,
-          parseInt('{{ rules|length }}') || 16,
-          parseInt('{{ posts|length }}') || 14
-        ];
-        donutChart.update();
-      }
-      updateWaveChart();
-    }
-  }).catch(() => updateWaveChart());
-}
-
-// Simulator function
-function runSim() {
-  const text = document.getElementById('sim-text').value;
-  if (!text) return alert('Enter a comment to test!');
+// Quick simulator function
+function sendQuickSim() {
+  const input = document.getElementById('sim-quick-text');
+  const txt = (input.value || '').trim();
+  if (!txt) return alert('Enter comment text!');
   fetch('/api/simulate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: text, username: 'sample_user' })
+    body: JSON.stringify({ text: txt, username: 'live_user' })
   }).then(r => r.json()).then(res => {
-    const box = document.getElementById('sim-result');
-    box.style.display = 'block';
-    if (res.matched) {
-      box.innerHTML = `<div style="color: #22c55e; font-weight: 700; margin-bottom: 6px;">&#10004; Match Found! (Keyword: "${res.keyword}")</div>
-                       <div style="font-size: 13px; margin-bottom: 4px;"><b>Public Reply:</b> ${res.comment_reply || 'None'}</div>
-                       <div style="font-size: 13px;"><b>Direct Message (DM):</b> ${res.dm_text || 'None'}</div>`;
-    } else {
-      box.innerHTML = `<div style="color: #ef4444; font-weight: 600;">&#10008; No automation rule matched this text.</div>`;
-    }
-  }).catch(e => alert('Error running simulator: ' + e));
+    input.value = '';
+    pollComments(true);
+  }).catch(e => alert('Error: ' + e));
 }
+
+// Real-time live polling for comments
+let knownCommentIds = new Set();
+function pollComments(flashFirst) {
+  fetch('/api/comments').then(r => r.json()).then(d => {
+    if (!d || !d.comments) return;
+    const container = document.getElementById('live-comments-container');
+    if (!container) return;
+    
+    let html = '';
+    d.comments.forEach((c, idx) => {
+      const isNew = flashFirst && idx === 0;
+      html += `
+      <div class="comment-card ${isNew ? 'new-item' : ''}" data-cid="${c.comment_id}">
+        <div class="comment-top">
+          <div class="commenter-info">
+            <div class="avatar-ring">
+              <div class="avatar-ring-inner">${(c.username || 'U').slice(0,2).toUpperCase()}</div>
+            </div>
+            <div>
+              <div class="commenter-name">@${c.username}</div>
+              <a href="#media" onclick="switchTab('media')" class="comment-post-ref">on Post #${c.media_id || '17992837482910'}</a>
+            </div>
+          </div>
+          <span style="font-size: 12px; color: var(--text-muted);">${c.created_at || 'Just now'}</span>
+        </div>
+        <div class="comment-bubble">${c.text}</div>
+        <div class="comment-automation-box">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+            <span class="keyword-tag" style="background: rgba(34, 197, 94, 0.15); color: #22c55e;">
+              &#9889; Matched Trigger: "${c.matched_keyword || 'price, link'}"
+            </span>
+            <span style="font-size: 11px; font-weight: 700; color: var(--accent-green);">&#10004; AUTO-PROCESSED</span>
+          </div>
+          ${c.reply_sent ? `<div class="auto-field"><span class="auto-label">&#128172; Public Reply:</span><span class="auto-text">${c.reply_sent}</span></div>` : ''}
+          ${c.dm_sent ? `<div class="auto-field"><span class="auto-label">&#128233; Private DM:</span><span class="auto-text">${c.dm_sent}</span></div>` : ''}
+        </div>
+      </div>`;
+    });
+    container.innerHTML = html;
+  }).catch(() => {});
+}
+
+// Polling interval every 4 seconds
+setInterval(() => {
+  if (document.getElementById('tab-comments') && document.getElementById('tab-comments').classList.contains('active')) {
+    pollComments(false);
+  }
+}, 4000);
+
+// Initialize Charts
+let waveChart, donutChart;
+let globalStats = { days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], series: { comment: [12, 19, 14, 25, 22, 30, 28], dm: [8, 15, 12, 20, 18, 25, 24] }, totals: { comment: 3236, dm: 3764 } };
+
+window.addEventListener('DOMContentLoaded', () => {
+  const hash = (location.hash || '#overview').replace('#', '');
+  switchTab(hash);
+
+  const waveCanvas = document.getElementById('waveChart');
+  if (waveCanvas) {
+    const waveCtx = waveCanvas.getContext('2d');
+    const grad = waveCtx.createLinearGradient(0, 0, 0, 160);
+    grad.addColorStop(0, 'rgba(168, 85, 247, 0.4)');
+    grad.addColorStop(1, 'rgba(168, 85, 247, 0.0)');
+    waveChart = new Chart(waveCtx, {
+      type: 'line',
+      data: {
+        labels: ['Mo', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+        datasets: [{
+          data: [20, 34, 26, 45, 40, 55, 52],
+          borderColor: '#a855f7',
+          borderWidth: 3,
+          tension: 0.45,
+          fill: true,
+          backgroundColor: grad,
+          pointRadius: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { grid: { display: false }, ticks: { color: '#6b7280' } }, y: { display: false } }
+      }
+    });
+  }
+
+  const donutCanvas = document.getElementById('donutChart');
+  if (donutCanvas) {
+    const donutCtx = donutCanvas.getContext('2d');
+    donutChart = new Chart(donutCtx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Replies', 'DMs', 'Rules', 'Posts'],
+        datasets: [{
+          data: [32, 38, 16, 14],
+          backgroundColor: ['#a855f7', '#ec4899', '#22c55e', '#06b6d4'],
+          borderWidth: 0,
+          borderRadius: 6
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '72%',
+        plugins: { legend: { display: false } }
+      }
+    });
+  }
+});
 </script>
 </body>
 </html>
