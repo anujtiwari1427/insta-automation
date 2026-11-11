@@ -20,6 +20,24 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config.update(SESSION_COOKIE_SECURE=BASE_URL.startswith("https"), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
+# Vercel Serverless Path Normalizer
+class VercelPathFix:
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+    def __call__(self, environ, start_response):
+        matched = environ.get('HTTP_X_MATCHED_PATH')
+        if matched:
+            environ['PATH_INFO'] = matched
+        else:
+            path = environ.get('PATH_INFO', '')
+            for prefix in ['/api/index.py', '/api/index', '/api']:
+                if path.startswith(prefix):
+                    environ['PATH_INFO'] = path[len(prefix):] or '/'
+                    break
+        return self.wsgi_app(environ, start_response)
+
+app.wsgi_app = VercelPathFix(app.wsgi_app)
+
 # ---------- DB (SQLite in /tmp for Vercel, Postgres via DATABASE_URL) ----------
 is_vercel = bool(os.environ.get("VERCEL"))
 default_db = "sqlite:////tmp/data.db" if is_vercel else "sqlite:///data.db"
@@ -79,6 +97,16 @@ def me():
     u = q("select * from users where ig_id=:i", i=session["ig"], one=True)
     if not u: session.clear(); abort(401)
     return u
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({
+        "error": "404 Not Found",
+        "path": request.path,
+        "full_path": request.full_path,
+        "url": request.url,
+        "environ_path": request.environ.get("PATH_INFO")
+    }), 404
 
 # ---------- auth: login = automatic token ----------
 @app.route("/")
