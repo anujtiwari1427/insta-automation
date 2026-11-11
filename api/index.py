@@ -264,6 +264,62 @@ def legal():
             f"<p>To delete all your data: log in and click <b>Disconnect &amp; delete my data</b> in the dashboard, or visit <a href='{BASE_URL}/disconnect'>{BASE_URL}/disconnect</a> while logged in.</p></body>")
 
 # ---------- dashboard + analytics ----------
+
+def sync_instagram_data(ig_id, tok):
+    try:
+        # 1. Fetch real media from Instagram Graph API
+        url = f"{G}/{ig_id}/media"
+        res = requests.get(url, params={
+            "fields": "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,comments_count,like_count",
+            "access_token": tok,
+            "limit": 20
+        }, timeout=10)
+        
+        if res.status_code != 200:
+            return {"success": False, "error": res.json().get("error", {}).get("message", res.text), "media_count": 0, "comments_count": 0}
+        
+        media_items = res.json().get("data", [])
+        if media_items:
+            q("delete from posts where ig_id=:i", i=ig_id)
+            q("delete from comments where ig_id=:i", i=ig_id)
+        
+        total_comments = 0
+        for m in media_items:
+            mid = m.get("id")
+            img_url = m.get("media_url") or m.get("thumbnail_url") or ""
+            cap = m.get("caption", "")
+            ts = (m.get("timestamp") or now())[:19].replace("T", " ")
+            q("insert into posts(ig_id, image_url, caption, run_at, status) values(:i, :u, :c, :t, 'published')",
+              i=ig_id, u=img_url, c=cap, t=ts)
+            
+            # 2. Fetch real comments for this media item
+            c_res = requests.get(f"{G}/{mid}/comments", params={
+                "fields": "id,text,from,timestamp,like_count",
+                "access_token": tok,
+                "limit": 25
+            }, timeout=8)
+            if c_res.status_code == 200:
+                comments = c_res.json().get("data", [])
+                for c in comments:
+                    cid = c.get("id")
+                    ctxt = c.get("text", "")
+                    cuser = (c.get("from") or {}).get("username") or "instagram_user"
+                    cuid = (c.get("from") or {}).get("id") or ""
+                    cts = (c.get("timestamp") or now())[:19].replace("T", " ")
+                    r, kw = match(ig_id, ctxt, mid)
+                    reply = fill(r["comment_reply"], cuser) if (r and r["comment_reply"]) else ""
+                    dm = fill(r["dm_text"], cuser) if (r and r["dm_text"]) else ""
+                    
+                    q("""insert into comments(ig_id, comment_id, media_id, username, user_id, text, reply_sent, dm_sent, matched_keyword, status, created_at)
+                         values(:i, :c, :m, :u, :uid, :t, :r, :d, :k, :s, :ts)
+                         on conflict(comment_id) do update set reply_sent=:r, dm_sent=:d, status=:s""",
+                      i=ig_id, c=cid, m=mid, u=cuser, uid=cuid, t=ctxt, r=reply, d=dm, k=kw or "", s="replied" if (reply or dm) else "received", ts=cts)
+                    total_comments += 1
+
+        return {"success": True, "media_count": len(media_items), "comments_count": total_comments}
+    except Exception as e:
+        return {"success": False, "error": str(e), "media_count": 0, "comments_count": 0}
+
 @app.route("/dashboard")
 def dashboard():
     u = me(); i = u["ig_id"]
@@ -280,6 +336,35 @@ def api_comments():
     u = me(); i = u["ig_id"]
     rows = q("select * from comments where ig_id=:i order by id desc limit 50", i=i)
     return jsonify({"comments": rows or []})
+
+
+@app.route("/api/sync", methods=["POST"])
+def api_sync():
+    u = me(); i = u["ig_id"]; tok = dec(u["token"])
+    res = sync_instagram_data(i, tok)
+    return jsonify(res)
+
+@app.route("/api/save-token", methods=["POST"])
+def api_save_token():
+    u = me(); i = u["ig_id"]
+    new_tok = (request.json or {}).get("token", "").strip()
+    if not new_tok:
+        return jsonify({"success": False, "error": "Token is required"}), 400
+    
+    # Verify token
+    test_res = requests.get(f"{G}/{i}?fields=id,username&access_token={new_tok}")
+    if test_res.status_code != 200:
+        # Try /me
+        test_res2 = requests.get(f"{G}/me?access_token={new_tok}")
+        if test_res2.status_code != 200:
+            return jsonify({"success": False, "error": "Invalid token or permissions: " + test_res.text}), 400
+    
+    # Save token
+    q("update users set token=:t where ig_id=:i", t=enc(new_tok), i=i)
+    
+    # Run sync
+    sync_res = sync_instagram_data(i, new_tok)
+    return jsonify({"success": True, "sync": sync_res})
 
 @app.route("/api/media")
 def api_media():
@@ -1751,14 +1836,49 @@ textarea.form-control { resize: vertical; min-height: 80px; }
     <div class="live-header-bar">
       <div>
         <h2 style="font-size: 22px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 4px;">
-          &#128248; Instagram Posts & Media Feed
+          &#128248; Real Instagram Posts &amp; Media Feed
         </h2>
-        <p style="font-size: 13px; color: var(--text-muted);">View all posts on your account, attach custom comment triggers, and inspect comment volume.</p>
+        <p style="font-size: 13px; color: var(--text-muted);">Live feed from @{{ user.username }} (ID: {{ user.ig_id }}). Attach custom automation rules to each post.</p>
       </div>
 
-      <a href="#posts" onclick="switchTab('posts')" class="btn-primary">
-        <span>+</span> Schedule New Post
-      </a>
+      <div style="display: flex; gap: 10px;">
+        <button onclick="triggerLiveSync()" id="btn-sync-media" class="btn-primary" style="background: linear-gradient(135deg, #a855f7, #6366f1); box-shadow: 0 4px 14px var(--accent-purple-glow);">
+          &#8635; Sync Real Instagram Posts
+        </button>
+        <a href="#posts" onclick="switchTab('posts')" class="btn-primary">
+          <span>+</span> Schedule Post
+        </a>
+      </div>
+    </div>
+
+    <!-- Live Sync / Token Card -->
+    <div class="form-card" style="border: 1px solid rgba(168, 85, 247, 0.25); background: rgba(168, 85, 247, 0.04); margin-bottom: 22px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px;">
+        <div>
+          <div style="font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 3px;">
+            &#128279; Meta Graph API v21.0 Feed Connection
+          </div>
+          <div style="font-size: 12px; color: var(--text-muted);">
+            Connected to Instagram Business ID: <b style="color: var(--accent-purple);">{{ user.ig_id }}</b> &middot; Page: <b>Code Decoded</b>
+          </div>
+        </div>
+        <button onclick="toggleTokenBox()" class="btn-toggle" style="background: #1e1f2b; font-size: 12px;">
+          Update Meta Token &rarr;
+        </button>
+      </div>
+
+      <div id="token-update-box" style="display: none; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-subtle);">
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 6px;">
+          Paste Graph API Explorer Page Access Token (from Meta for Developers)
+        </label>
+        <div style="display: flex; gap: 10px;">
+          <input type="password" id="input-new-token" class="form-control" placeholder="EAA..." style="flex-grow: 1;">
+          <button onclick="saveLiveToken()" id="btn-save-tok" class="btn-primary" style="white-space: nowrap;">Save &amp; Sync Feed</button>
+        </div>
+        <small style="color: var(--text-muted); display: block; margin-top: 6px;">
+          Token requires <code>instagram_basic</code>, <code>instagram_manage_comments</code>, and <code>pages_read_engagement</code> permissions.
+        </small>
+      </div>
     </div>
 
     <!-- Posts Grid -->
@@ -2042,6 +2162,59 @@ setInterval(() => {
 // Initialize Charts
 let waveChart, donutChart;
 let globalStats = { days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], series: { comment: [12, 19, 14, 25, 22, 30, 28], dm: [8, 15, 12, 20, 18, 25, 24] }, totals: { comment: 3236, dm: 3764 } };
+
+function triggerLiveSync() {
+  const btn = document.getElementById('btn-sync-media');
+  if (btn) btn.innerText = 'Syncing from Meta...';
+  fetch('/api/sync', { method: 'POST' })
+    .then(r => r.json())
+    .then(res => {
+      if (btn) btn.innerText = '⟳ Sync Real Instagram Posts';
+      if (res.success) {
+        alert('Successfully synced ' + res.media_count + ' real posts and ' + res.comments_count + ' real comments from Instagram!');
+        location.reload();
+      } else {
+        alert('Meta Graph API Notice: ' + (res.error || 'Token requires instagram_basic permission. Click "Update Meta Token" to connect your Graph API token.'));
+        const box = document.getElementById('token-update-box');
+        if (box) box.style.display = 'block';
+      }
+    })
+    .catch(e => {
+      if (btn) btn.innerText = '⟳ Sync Real Instagram Posts';
+      alert('Sync error: ' + e);
+    });
+}
+
+function toggleTokenBox() {
+  const box = document.getElementById('token-update-box');
+  if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none';
+}
+
+function saveLiveToken() {
+  const tok = (document.getElementById('input-new-token').value || '').trim();
+  if (!tok) return alert('Please paste your Meta Access Token!');
+  const btn = document.getElementById('btn-save-tok');
+  if (btn) btn.innerText = 'Connecting...';
+  fetch('/api/save-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: tok })
+  })
+  .then(r => r.json())
+  .then(res => {
+    if (btn) btn.innerText = 'Save & Sync Feed';
+    if (res.success) {
+      alert('Token connected! Synced ' + (res.sync.media_count || 0) + ' real Instagram posts.');
+      location.reload();
+    } else {
+      alert('Token verification error: ' + (res.error || 'Invalid token.'));
+    }
+  })
+  .catch(e => {
+    if (btn) btn.innerText = 'Save & Sync Feed';
+    alert('Error: ' + e);
+  });
+}
 
 window.addEventListener('DOMContentLoaded', () => {
   const hash = (location.hash || '#overview').replace('#', '');
