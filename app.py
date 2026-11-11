@@ -16,10 +16,11 @@ G = "https://graph.instagram.com/v21.0"
 SCOPES = ",".join(["instagram_business_basic", "instagram_business_manage_comments",
                    "instagram_business_manage_messages", "instagram_business_content_publish"])
 
-app = Flask(__name__); app.secret_key = SECRET_KEY
+app = Flask(__name__)
+app.secret_key = SECRET_KEY
 app.config.update(SESSION_COOKIE_SECURE=BASE_URL.startswith("https"), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
-# ---------- DB (SQLite by default, Postgres via DATABASE_URL) ----------
+# ---------- DB (SQLite in /tmp for Vercel, Postgres via DATABASE_URL) ----------
 is_vercel = bool(os.environ.get("VERCEL"))
 default_db = "sqlite:////tmp/data.db" if is_vercel else "sqlite:///data.db"
 URL = os.environ.get("DATABASE_URL", default_db).replace("postgres://", "postgresql://")
@@ -33,11 +34,27 @@ def q(sql, one=False, **a):
         rows = [dict(x._mapping) for x in r]
         return (rows[0] if rows else None) if one else rows
 
-for s in ["create table if not exists users(ig_id text primary key, username text, token text)",
-          f"create table if not exists rules(id {PK}, ig_id text, keyword text, media_id text, comment_reply text, dm_text text, active integer default 1)",
-          f"create table if not exists posts(id {PK}, ig_id text, image_url text, caption text, run_at text, status text default 'pending')",
-          f"create table if not exists logs(id {PK}, ig_id text, ts text, kind text, keyword text, who text, ref text, msg text)"]:
-    q(s)
+_db_ready = False
+def init_db():
+    global _db_ready
+    if _db_ready: return
+    try:
+        for s in [
+            "create table if not exists users(ig_id text primary key, username text, token text)",
+            f"create table if not exists rules(id {PK}, ig_id text, keyword text, media_id text, comment_reply text, dm_text text, active integer default 1)",
+            f"create table if not exists posts(id {PK}, ig_id text, image_url text, caption text, run_at text, status text default 'pending')",
+            f"create table if not exists logs(id {PK}, ig_id text, ts text, kind text, keyword text, who text, ref text, msg text)"
+        ]:
+            q(s)
+        _db_ready = True
+    except Exception as e:
+        print("Database init notice:", e)
+
+init_db()
+
+@app.before_request
+def check_db():
+    init_db()
 
 # ---------- helpers ----------
 F = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest()))
@@ -53,7 +70,7 @@ def api(url, tok, **kw):
     try: return requests.post(url, params={"access_token": tok}, timeout=20, **kw).json()
     except Exception as e: return {"error": str(e)}
 
-def fill(s, name):  # one variant per line, picked at random; {username} placeholder
+def fill(s, name):
     opts = [x.strip() for x in (s or "").split("\n") if x.strip()]
     return random.choice(opts).replace("{username}", "@" + name) if opts else ""
 
@@ -103,7 +120,7 @@ def callback():
 @app.route("/logout")
 def logout(): session.clear(); return redirect("/")
 
-@app.route("/disconnect")  # deletes everything we hold for this user
+@app.route("/disconnect")
 def disconnect():
     u = me()
     for t in ["logs", "posts", "rules", "users"]: q(f"delete from {t} where ig_id=:i", i=u["ig_id"])
@@ -233,7 +250,7 @@ def publish_due():
         q("update posts set status=:s where id=:i", s="posted" if ok else "failed", i=p["id"])
         log(p["ig_id"], "post" if ok else "error", f"Post {'published' if ok else 'failed: ' + str(r)[:120]}")
 
-def refresh_tokens():  # long-lived tokens last 60 days
+def refresh_tokens():
     for u in q("select * from users"):
         r = requests.get("https://graph.instagram.com/refresh_access_token",
                          params={"grant_type": "ig_refresh_token", "access_token": dec(u["token"])}).json()

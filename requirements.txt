@@ -1,8 +1,6 @@
 flask
 requests
 apscheduler
-gunicorn
 sqlalchemy
-psycopg2-binary
 cryptography
 python-dotenv
