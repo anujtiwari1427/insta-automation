@@ -98,6 +98,17 @@ def me():
     if not u: session.clear(); abort(401)
     return u
 
+import traceback
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({
+        "error": "Unhandled Exception",
+        "type": type(e).__name__,
+        "message": str(e),
+        "traceback": traceback.format_exc()
+    }), 500
+
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({
