@@ -25,15 +25,14 @@ class VercelPathFix:
     def __init__(self, wsgi_app):
         self.wsgi_app = wsgi_app
     def __call__(self, environ, start_response):
-        matched = environ.get('HTTP_X_MATCHED_PATH')
-        if matched:
-            environ['PATH_INFO'] = matched
-        else:
-            path = environ.get('PATH_INFO', '')
-            for prefix in ['/api/index.py', '/api/index', '/api']:
-                if path.startswith(prefix):
-                    environ['PATH_INFO'] = path[len(prefix):] or '/'
-                    break
+        environ['DEBUG_ORIG_PATH_INFO'] = environ.get('PATH_INFO', '')
+        # If HTTP_X_MATCHED_PATH is present, what is it?
+        # Let's preserve the original path unless it starts with /api/
+        path = environ.get('PATH_INFO', '')
+        for prefix in ['/api/index.py', '/api/index']:
+            if path.startswith(prefix):
+                environ['PATH_INFO'] = path[len(prefix):] or '/'
+                break
         return self.wsgi_app(environ, start_response)
 
 app.wsgi_app = VercelPathFix(app.wsgi_app)
@@ -169,6 +168,11 @@ def not_found(e):
 # ---------- auth: login = automatic token ----------
 @app.route("/")
 def home():
+    if request.args.get("debug"):
+        return jsonify({
+            k: v for k, v in request.environ.items() 
+            if isinstance(v, (str, int, float, bool)) and any(x in k.lower() for x in ["path", "uri", "matched", "url", "route", "forwarded"])
+        })
     ig_id = os.environ.get("IG_BUSINESS_ID")
     if "ig" not in session and ig_id:
         tok = os.environ.get("PAGE_ACCESS_TOKEN", "")
